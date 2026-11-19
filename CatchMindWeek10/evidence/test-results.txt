@@ -1,0 +1,15 @@
+PASS /JOIN_OK Kyumin
+PASS /JOIN_OK Jeongman
+PASS /PLAYERS Kyumin Jeongman
+PASS /CHAT_MSG Kyumin: hello-week10
+PASS /CHAT_MSG Kyumin: hello-week10
+PASS /CHAT_MSG Jeongman: 한글 채팅 확인
+PASS /ERROR DUPLICATE_NAME
+PASS /JOIN_OK Player3
+PASS /JOIN_OK Player4
+PASS /ERROR ROOM_FULL
+PASS /ERROR UNKNOWN_COMMAND
+PASS /ERROR INVALID_CHAT
+PASS /JOIN_OK Kyumin
+PASS Swing construction and rendering
+ALL CHECKS PASSED
