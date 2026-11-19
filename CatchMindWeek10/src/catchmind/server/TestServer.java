@@ -10,7 +10,7 @@ public class TestServer {
 	private static final int MAX_PLAYER = 4;
 	private static final int MAX_CHAT_LENGTH = 200;
 
-	// ------------------ 그림판 관련 상수 ------------------------ //
+	// ---------- 그림판 관련 상수------------------------ //
 	// 클라이언트 그림판(Board) 크기가 580 x 340 이므로
 	// 좌표는 x: 0 ~ 579, y: 0 ~ 339 범위만 정상으로 본다.
 	private static final int BOARD_WIDTH = 580;
@@ -145,8 +145,10 @@ public class TestServer {
 							send("/ERROR INVALID_CHAT");
 					} else if (message.startsWith("/DRAW")) { // 선 하나 그리기
 						handleDraw(message);
+						// broadcast("/DRAW"); // 테스트용 (DRAW)
 					} else if (message.startsWith("/CLEAR")) { // 선 하나 지우기
 						handleClear(message);
+						broadcast("/CLEAR " + name + ": " + "님이 전체 삭제 하였습니다.");
 					} else // [!] 이 else 전에 다른 채팅 프로토콜 추가
 						send("/ERROR UNKNOWN_COMMAND");
 				}
