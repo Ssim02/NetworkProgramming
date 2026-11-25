@@ -4,7 +4,7 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 
-public class TestServer {
+public class ServerMain {
 	// static final 상수들 정의 -> 이거 필요하면 쓰세요
 	private static final int PORT = 5000;
 	private static final int MAX_PLAYER = 4;
@@ -108,7 +108,7 @@ public class TestServer {
 				// ---------------- 검사 조건 ------------------ //
 				// 1. 한글, 영문, 숫자 중 하나로 12자리까지 (정규식) / 공백 안됨
 				name = request.substring(6).trim();
-				synchronized (TestServer.class) {
+				synchronized (ServerMain.class) {
 					if (!name.matches("[가-힣a-zA-Z0-9_]{1,12}")) {
 						send("/ERROR INVALID_NAME");
 						return;
@@ -145,7 +145,7 @@ public class TestServer {
 							send("/ERROR INVALID_CHAT");
 					} else if (message.startsWith("/DRAW")) { // 선 하나 그리기
 						handleDraw(message);
-						// broadcast("/DRAW"); // 테스트용 (DRAW)
+						broadcast("/DRAW"); // 테스트용 (DRAW)
 					} else if (message.startsWith("/CLEAR")) { // 선 하나 지우기
 						handleClear(message);
 						broadcast("/CLEAR " + name + ": " + "님이 전체 삭제 하였습니다.");
@@ -155,7 +155,7 @@ public class TestServer {
 			} catch (IOException e) { // ---------- 퇴장 처리 ---------------- //
 				System.out.println("Disconnected: " + name);
 			} finally {
-				synchronized (TestServer.class) {
+				synchronized (ServerMain.class) {
 					if (joined) { // joined로 실제로 접속했던 사람인지 확인하고, 그 경우에만 접속자 명단에서 지움 (동일 닉네임 퇴장 처리 방지)
 						clients.remove(name);
 						players();
