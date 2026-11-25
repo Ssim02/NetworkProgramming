@@ -3,6 +3,12 @@ package catchmind.server;
 import java.io.*;
 import java.net.*;
 import java.util.*;
+import javax.swing.JButton;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.SwingUtilities;
 
 public class ServerMain {
 	// static final 상수들 정의 -> 이거 필요하면 쓰세요
@@ -18,23 +24,51 @@ public class ServerMain {
 	// 굵기: 클라이언트 선택지는 2, 4, 8, 12 -> 서버는 1 ~ 20 범위로 여유 있게 허용
 	private static final int MIN_STROKE = 1;
 	private static final int MAX_STROKE = 20;
-	// 라운드: 12주차에 라운드가 생기기 전까지는 1로 고정
-	// (메시지 형식에 미리 라운드 칸을 넣어 두면, 12주차에 형식을 다시 바꿀 필요가 없음)
-	private static final int CURRENT_ROUND = 1;
+//	// 라운드: 12주차에 라운드가 생기기 전까지는 1로 고정
+//	// (메시지 형식에 미리 라운드 칸을 넣어 두면, 12주차에 형식을 다시 바꿀 필요가 없음)
+//	private static final int CURRENT_ROUND = 1;
 	// -------------------------------------------------------- //
 
 	// LinkedHashMap -> 들어온 순서대로 기억
 	// client 명단은 하나만 쓰기 (final)
 	private static final Map<String, Client> clients = new LinkedHashMap<>(); // 현재 들어와 있는 사람 목록 (닉네임 -> 연결) 형태
 
+	// [12주차 추가] 서버 종료용
+	private static ServerSocket server; // shutdown()에서 닫을 수 있도록 서버 보관
+	private static volatile boolean running = true; // false가 되면, 종료 버튼으로 끈 것
+
+	// [12주차 추가] 게임 상태 -> clients처럼 반드시 syncronized(ServerMain.class)안에서만 사용
+	private static final String[] WORDS = { "사과", "고양이", "자전거", "우산", "기차" };
+	private static final int ROUND_SECONDS = 10; // 테스트용이라, 임시로 10으로 설정 (실제는 60으로 세팅할 것)
+	private static final Set<String> ready = new HashSet<>(); // 준비한 사람 닉네임
+	private static int currentRound = 0;  // 현재 라운드 번호
+	private static String drawer = null;  // 출제자 (null이면 대기 중)
+	private static String word = null;    // 제시어
+	
+	
 	public static void main(String[] args) throws IOException {
-		try (ServerSocket server = new ServerSocket(PORT)) {
-			System.out.println("CatchCatch test server: TCP " + PORT);
-			while (true) {
-				Socket socket = server.accept();
+		try (ServerSocket ss = new ServerSocket(PORT)) {
+			server = ss; // 필드에 보관 -> shutdown()이 닫을 수 있게
+			SwingUtilities.invokeLater(() -> createControlWindow()); // 제어 창 -> EDT에서 생성
+			System.out.println("CatchCatch server: TCP " + PORT);
+			
+			while (running) {
+				Socket socket = ss.accept(); // 접속 올 때까지 대기 (shutdown()이 닫으면 여기서 SocketException)
 				new Thread(new Client(socket), "client-" + socket.getRemoteSocketAddress()).start(); // client-/ip:port
 																										// 형식으로 나오게
 			}
+		} catch (BindException e) {
+			// 포트를 이미 다른 프로그램이 쓰고 있는 경우
+			System.out.println("PORT " + PORT + "가 이미 사용 중입니다. 실행 중인 서버를 먼저 종료하세요. ");
+			JOptionPane.showMessageDialog(null, "PORT " + PORT + "에서 이미 서버가 실행 중입니다.\n기존 서버를 종료한 뒤 다시 실행하세요. ",
+					"서버 실행 실패", JOptionPane.ERROR_MESSAGE);
+			System.exit(1); // 1 -> 비정상 종료
+		} catch (SocketException e) {
+			// shutdown()이 ServerSocket을 닫으면 accept()가 이 예외를 던짐
+			if (running) {
+				throw e; // 종료 버튼 때문이 아니면 진짜 오류 -> 그대로 밖으로
+			}
+			System.out.println("서버를 종료했습니다.");
 		}
 	}
 
@@ -76,6 +110,103 @@ public class ServerMain {
 		broadcast("/PLAYERS " + String.join(" ", clients.keySet()));
 	}
 
+	// [12주차 추가] 라운드 시작
+	private static void startRound() {
+		Random random = new Random();
+		List<String> names = new ArrayList<>(clients.keySet());
+		drawer = names.get(random.nextInt(names.size())); // 출제자 랜덤 선정
+		word = WORDS[random.nextInt(WORDS.length)]; // 제시어 랜덤 선정
+		currentRound++;
+		ready.clear(); // 다음 라운드 준비를 위해 준비 상태 초기화
+		
+		broadcast("/START " + currentRound + " " + drawer + " " + ROUND_SECONDS);
+	    clients.get(drawer).send("/WORD " + word); // 제시어는 출제자에게만
+	    System.out.println("(제시어: " + word + ")"); // 서버 콘솔 확인용
+	    
+	    // 시간 종료 타이머
+	    // 라운드를 시작할 때 타이머 스레드를 하나 띄움. 60초동안 슬립하고, 슬립 끝난 시점에도 아직 아무도 정답 맞추지 못했다면 라운드를 끝낸다
+	    int thisRound = currentRound; // 이 타이머가 담당하는 라운드 번호를 기억
+	    Thread timer = new Thread(() -> {
+	    	try {
+	    		Thread.sleep(ROUND_SECONDS * 1000L); // ROUND_SECONDS 초 대기
+	    	} catch (InterruptedException e) {
+	    		return;
+	    	}
+	    	synchronized (ServerMain.class) {
+	    		// 아직 라운드 진행 중 && 내가 담당한 라운드 -> 이 경우에만 종료
+	    		if (drawer != null && currentRound == thisRound) {
+	    			endRound("-");
+	    		} 
+	    	}
+	    }, "timer-round-" + thisRound);
+	    timer.setDaemon(true);
+	    timer.start();
+	}
+	
+	// [12주차 추가] 라운드 종료
+	// winner : 맞힌 사람 닉네임 (시간 초과 시 '-'로 표시)
+	private static void endRound(String winner) {
+		broadcast("/RESULT " + currentRound + " " + winner + " " + word);
+		drawer = null; // drawer = null이면, 대기 상태라는 뜻. 이거 안하면 영원히 다음 라운드 시작 불가 (handleReady()가 drawer != null이면 ALERAY_PLAYING을 보내기 때문
+		word = null;
+	}
+	
+	// [12주차 추가] 서버 종료 : 종료 버튼에서 호출
+	// 1. running == false -> 일부러 끈 것이라고 표시"
+	// 2. ServerSocket 닫기 -> main의 accept()가 깨어나서 종료
+	// 3. 모든 클라이언트 소켓 닫기 -> 각 스레드의 readUTF()가 깨어나서 기존 퇴장 처리 실행
+	static void shutdown() {
+		List<Client> copy;
+		synchronized (ServerMain.class) {
+			if (!running) {
+				return; // 이미 종료 -> 무시
+			}
+			running = false;
+			broadcast("/NOTICE 서버가 종료됩니다.");
+			copy = new ArrayList<>(clients.values()); // 명단 복사본
+		}
+		try {
+			if (server != null) {
+				server.close();
+			}
+		} catch (IOException ignored) {
+			
+		}
+		for (Client client : copy) {
+			try {
+				client.socket.close();
+			} catch (IOException ignored) {
+				
+			}
+		}
+	}
+	
+	// [12주차 추가] 서버 제어 창 : 상태 표시 + 종료 버튼
+	private static void createControlWindow() {
+		JFrame frame = new JFrame("CatchCatch 서버");
+		JLabel status = new JLabel("실행 중 - TCP " + PORT);
+		JButton stop = new JButton("서버 종료");
+		
+		// 버튼 클릭 시 수행
+		stop.addActionListener(e -> {
+			stop.setEnabled(false); // 두번 누르지 못하도록 비활성화
+			status.setText("종료 중...");
+			shutdown();
+			frame.dispose(); // 창 닫기
+		});
+		
+		JPanel panel = new JPanel();
+		panel.add(status);
+		panel.add(stop);
+		frame.add(panel);
+		
+		frame.setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
+		
+		frame.pack(); // 내용을 크기에 맞게 창 크기 조절
+		frame.setLocationRelativeTo(null);
+		frame.setVisible(true); // 화면 표시
+	}
+	
 	// [11주차 추가] 좌표가 그림판 안에 있는지 검사
 	// x: 0 이상 580 미만, y: 0 이상 340 미만이면 true
 	private static boolean inBoard(int x, int y) {
@@ -140,15 +271,19 @@ public class ServerMain {
 						String text = message.substring(6).trim();
 						if (!text.isEmpty() && text.length() <= MAX_CHAT_LENGTH && !text.contains("\n")
 								&& !text.contains("\r")) { // 채팅 조건 4가지
-							broadcast("/CHAT_MSG " + name + ": " + text); // 통과 -> 채팅 broadcast
+							if (!checkAnswer(text)) { // 정답이 아니다 -> 일반 채팅이라고 판정
+								broadcast("/CHAT_MSG " + name + ": " + text); // 통과 -> 채팅 broadcast								
+							}
 						} else
 							send("/ERROR INVALID_CHAT");
 					} else if (message.startsWith("/DRAW")) { // 선 하나 그리기
 						handleDraw(message);
-						broadcast("/DRAW"); // 테스트용 (DRAW)
+						// broadcast("/DRAW"); // 테스트용 (DRAW)
 					} else if (message.startsWith("/CLEAR")) { // 선 하나 지우기
 						handleClear(message);
-						broadcast("/CLEAR " + name + ": " + "님이 전체 삭제 하였습니다.");
+						// broadcast("/CLEAR " + name + ": " + "님이 전체 삭제 하였습니다.");
+					} else if (message.equals("/READY")) {
+						handleReady();
 					} else // [!] 이 else 전에 다른 채팅 프로토콜 추가
 						send("/ERROR UNKNOWN_COMMAND");
 				}
@@ -158,6 +293,7 @@ public class ServerMain {
 				synchronized (ServerMain.class) {
 					if (joined) { // joined로 실제로 접속했던 사람인지 확인하고, 그 경우에만 접속자 명단에서 지움 (동일 닉네임 퇴장 처리 방지)
 						clients.remove(name);
+						ready.remove(name); // 준비 목록에서 제거
 						players();
 						broadcast("/NOTICE " + name + " 님이 퇴장했습니다.");
 					}
@@ -189,22 +325,28 @@ public class ServerMain {
 				int stroke = Integer.parseInt(p[7]);
 
 				// 3. 값 검사 (하나라도 틀리면 오류)
-				// - 라운드가 현재 라운드와 같은지
 				// - 시작점, 끝점이 둘 다 그림판 안인지
 				// - 색이 16진수 6자리(RRGGBB)인지 ex) 000000(검정), FFFFFF(흰색 = 지우개)
 				// - 굵기가 허용 범위 안인지
-				if (round != CURRENT_ROUND || !inBoard(x1, y1) || !inBoard(x2, y2) || !color.matches("[0-9A-Fa-f]{6}")
-						|| stroke < MIN_STROKE || stroke > MAX_STROKE) {
-					send("/ERROR INVALID_DRAW");
+				if (!inBoard(x1, y1) || !inBoard(x2, y2) || !color.matches("[0-9A-Fa-f]{6}")
+				        || stroke < MIN_STROKE || stroke > MAX_STROKE) {
+				    send("/ERROR INVALID_DRAW");
+				    return;
+				}
+				// 그리기 권한 검사
+				if (!canDraw(round)) {
+					send("/ERROR NOT_DRAWER");
 					return;
 				}
-
+				
 				// 4. 통과 -> 보낸 사람을 뺀 나머지에게 전달
 				// 받은 문자열을 그대로 넘기지 않고, 검사한 값으로 다시 조립해서 보냄
 				// -> "+5"처럼 parseInt는 통과하지만 모양이 다른 값도 항상 같은 형식으로 정리됨
 				// 색은 대문자로 통일 (ff0000 -> FF0000)
 				broadcastExcept(this, "/DRAW " + round + " " + x1 + " " + y1 + " " + x2 + " " + y2 + " "
 						+ color.toUpperCase() + " " + stroke);
+				
+				
 			} catch (NumberFormatException e) {
 				send("/ERROR INVALID_DRAW");
 			}
@@ -220,18 +362,55 @@ public class ServerMain {
 			}
 			try {
 				int round = Integer.parseInt(p[1]);
-				if (round != CURRENT_ROUND) {
-					send("/ERROR INVALID_CLEAR");
+				if (!canDraw(round)) { // 출제자 + 현재 라운드만 지울 수 있음
+					send("/ERROR NOT_DRAWER");
 					return;
 				}
 				// 보낸 사람은 버튼을 누를 때 이미 지웠으므로, 나머지에게만 전달
 				broadcastExcept(this, "/CLEAR " + round);
-				// /DRAW와 달리 자주 오는 메시지가 아니므로, 누가 지웠는지 콘솔에 남김 (테스트 확인용)
-				System.out.println("/CLEAR " + round + " (by " + name + ")");
+				// 누가 지웠는지 전원에게 안내
+				broadcast("/NOTICE " + name + " 님이 그림판을 지웠습니다."); // 안내는 NOTICE 프로토콜로
 			} catch (NumberFormatException e) {
 				send("/ERROR INVALID_CLEAR");
 			}
 		}
+		
+		// [12주차 추가] /READY: 모두 준비하면 라운드 시작
+		void handleReady() {
+			synchronized (ServerMain.class) {
+				if (drawer != null) { // 이미 라운드 진행 중인 경우
+					send("/ERROR ALREADY_PLAYING");
+					return;
+				}
+				ready.add(name);
+				broadcast("/NOTICE " + name + " 님이 준비했습니다.");
+				if (clients.size() >= 2 && ready.size() == clients.size()) { // 2명 이상 + 전원 준비 시 시작 가능
+					startRound();
+				}
+			}
+		}
+		
+		// [12주차 추가] 정답 판정 : 정답이라면 라운드 종료 후 true
+		boolean checkAnswer(String text) {
+		    synchronized (ServerMain.class) {
+		        if (drawer != null && name.equals(drawer) && text.contains(word)) { // 출제자가 정답을 말하려 함. contain으로 정답이 포함만 돼도 막아버림
+		            send("/ERROR ANSWER_LEAK");
+		            return true; // 채팅으로 보내지 않음
+		        }
+		        if (drawer == null || name.equals(drawer) || !text.equals(word))
+		            return false;
+		        endRound(name);
+		        return true;
+		    }
+		}
+		
+		// [12주차 추가] 그리기 권한 : 라운드 진행 중 + 출제자 본인 + 현재 라운드 번호
+		boolean canDraw(int round) {
+			synchronized (ServerMain.class) {
+				return drawer != null && name.equals(drawer) && round == currentRound;
+			}
+		}
+		
 		// ====================================================================== //
 
 		// 전체가 아니라 한 명에게만 보내는 메서드
