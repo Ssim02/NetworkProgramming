@@ -11,6 +11,7 @@ import javax.swing.border.*;
 
 /** 임규민 담당: 기본 화면, 로컬 그림판, TCP 접속과 채팅. */
 public class ClientMain extends JFrame {
+	private static final int ROUND = 1;
 	private static final Color NAVY = new Color(21, 52, 109);
 	private static final Color BLUE = new Color(45, 126, 204);
 	private static final Color PALE = new Color(218, 240, 255);
@@ -85,7 +86,11 @@ public class ClientMain extends JFrame {
 		widths.addActionListener(e -> board.width = (Integer) widths.getSelectedItem());
 		controls.add(widths);
 		JButton clear = new JButton("전체 지우기");
-		clear.addActionListener(e -> board.clear());
+		board.onDraw = this::sendDraw;
+		clear.addActionListener(e -> {
+			board.clear();
+			sendRaw("/CLEAR " + ROUND);
+		});
 		controls.add(clear);
 		canvasBox.add(controls, BorderLayout.SOUTH);
 		center.add(canvasBox, BorderLayout.CENTER);
@@ -108,7 +113,7 @@ public class ClientMain extends JFrame {
 		conversation.add(entry, BorderLayout.SOUTH);
 		center.add(conversation, BorderLayout.SOUTH);
 		root.add(center);
-		JLabel footer = new JLabel("그림으로 말해요!   |   이번 주: 로컬 그림판 + 온라인 채팅", SwingConstants.CENTER);
+		JLabel footer = new JLabel("그림으로 말해요!   |   온라인 그림 공유 + 채팅", SwingConstants.CENTER);
 		footer.setForeground(Color.WHITE);
 		root.add(footer, BorderLayout.SOUTH);
 		input.setEnabled(false);
@@ -230,6 +235,8 @@ public class ClientMain extends JFrame {
 	}
 
 	private void handle(String message) {
+		if (handleDrawing(message))
+			return;
 		if (message.startsWith("/PLAYERS ")) {
 			String list = message.substring(9).trim();
 			String[] users = list.isEmpty() ? new String[0] : list.split(" ");
@@ -245,6 +252,36 @@ public class ClientMain extends JFrame {
 		}
 	}
 
+	private boolean handleDrawing(String message) {
+		if (!message.startsWith("/DRAW") && !message.startsWith("/CLEAR"))
+			return false;
+		String[] parts = message.split(" ");
+		boolean draw = parts[0].equals("/DRAW");
+		if (!draw && !parts[0].equals("/CLEAR"))
+			return false;
+		if (parts.length != (draw ? 8 : 2))
+			return true;
+
+		try {
+			if (Integer.parseInt(parts[1]) != ROUND)
+				return true;
+			if (!draw) {
+				board.clear();
+				return true;
+			}
+			Point a = new Point(Integer.parseInt(parts[2]), Integer.parseInt(parts[3]));
+			Point b = new Point(Integer.parseInt(parts[4]), Integer.parseInt(parts[5]));
+			int width = Integer.parseInt(parts[7]);
+			if (a.equals(Board.clamp(a)) && b.equals(Board.clamp(b)) && parts[6].matches("[0-9A-Fa-f]{6}") && width >= 1
+					&& width <= 20) {
+				board.line(a, b, new Color(Integer.parseInt(parts[6], 16)), width);
+			}
+		} catch (NumberFormatException e) {
+			// 잘못된 그림 메시지만 건너뛰고 다음 메시지를 처리한다.
+		}
+		return true;
+	}
+
 	private void reset(String reason) {
 		status.setText(reason);
 		connect.setEnabled(true);
@@ -257,18 +294,34 @@ public class ClientMain extends JFrame {
 
 	private void sendChat() {
 		String text = input.getText().trim();
-		DataOutputStream writer = out;
-		Socket s = socket;
-		if (text.isEmpty() || writer == null)
+		if (text.isEmpty() || out == null)
 			return;
 		if (text.length() > 200) {
 			JOptionPane.showMessageDialog(this, "200자 이내로 입력하세요.");
 			return;
 		}
 		input.setText("");
+		sendRaw("/CHAT " + text);
+	}
+
+	private void sendDraw(Point a, Point b, Color color, int width) {
+		if (out == null)
+			return;
+		String rgb = String.format("%06X", color.getRGB() & 0xFFFFFF);
+		sendRaw("/DRAW " + ROUND + " " + a.x + " " + a.y + " " + b.x + " " + b.y + " " + rgb + " " + width);
+	}
+
+	private void sendRaw(String message) {
+		// 같은 접속의 전송 작업을 한 스레드에서 순서대로 처리한다.
+		Socket s = socket;
+		DataOutputStream writer = out;
+		if (s == null || writer == null || s.isClosed())
+			return;
 		sender.execute(() -> {
+			if (s.isClosed())
+				return;
 			try {
-				writer.writeUTF("/CHAT " + text);
+				writer.writeUTF(message);
 				writer.flush();
 			} catch (IOException e) {
 				close(s);
@@ -284,8 +337,16 @@ public class ClientMain extends JFrame {
 			}
 	}
 
+	@FunctionalInterface
+	private interface DrawListener {
+		void draw(Point a, Point b, Color color, int width);
+	}
+
 	private static class Board extends JPanel {
-		final BufferedImage image = new BufferedImage(580, 340, BufferedImage.TYPE_INT_RGB);
+		private static final int WIDTH = 580;
+		private static final int HEIGHT = 340;
+		final BufferedImage image = new BufferedImage(WIDTH, HEIGHT, BufferedImage.TYPE_INT_RGB);
+		DrawListener onDraw;
 		Color color = Color.BLACK;
 		int width = 4;
 		Point previous;
@@ -318,6 +379,18 @@ public class ClientMain extends JFrame {
 		}
 
 		void line(Point a, Point b) {
+			Point start = clamp(a);
+			Point end = clamp(b);
+			line(start, end, color, width);
+			if (onDraw != null)
+				onDraw.draw(start, end, color, width);
+		}
+
+		static Point clamp(Point p) {
+			return new Point(Math.max(0, Math.min(WIDTH - 1, p.x)), Math.max(0, Math.min(HEIGHT - 1, p.y)));
+		}
+
+		void line(Point a, Point b, Color color, int width) {
 			Graphics2D g = image.createGraphics();
 			g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 			g.setColor(color);
